@@ -184,5 +184,6 @@ async def handle_task_result(payload: RunTaskPayload) -> None:
         logger.exception("Error handling task result")
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("run_task_service:app", host="0.0.0.0", port=3000, reload=True)
+    import uvicorn, os
+    port = int(os.getenv("PORT", 3000))
+    uvicorn.run("run_task_service:app", host="0.0.0.0", port=port)
