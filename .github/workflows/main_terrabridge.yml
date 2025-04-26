@@ -14,28 +14,23 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read #This is required for actions/checkout
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python version
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: "Set up Python"
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version-file: ".python-version"
 
-      - name: Install uv (binary)
-        run: curl -Ls https://astral.sh/uv/install.sh | sh
-
-      - name: Create and start virtual environment
-        run: |
-          uv venv venv
-          source venv/bin/activate
-
-      - name: Install dependencies
+      - name: Install requirements
         run: uv pip install -r requirements.txt
-        
-      # Optional: Add step to run tests here (PyTest, Django test suites, etc.)
+        env:
+          UV_SYSTEM_PYTHON: 1
 
       - name: Zip artifact for deployment
         run: zip release.zip ./* -r
@@ -46,7 +41,6 @@ jobs:
           name: python-app
           path: |
             release.zip
-            !venv/
 
   deploy:
     runs-on: ubuntu-latest
@@ -81,4 +75,3 @@ jobs:
         with:
           app-name: 'terrabridge'
           slot-name: 'Production'
-          
