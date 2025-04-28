@@ -6,11 +6,10 @@ from typing import Optional, Tuple
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, HttpUrl, ValidationError, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, Field, HttpUrl, ValidationError, SecretStr, ConfigDict
+import json
 import hmac
 import hashlib
-import json
 from settings import get_settings, Settings
 
 # -------------------- Logging --------------------
@@ -39,13 +38,13 @@ async def shutdown_event():
 
 # -------------------- Models --------------------
 class RunTaskPayload(BaseModel):
+    payload_version: int
     stage: str
-    is_destroy: bool = Field(False, alias="is-destroy")
-    task_result_callback_url: HttpUrl = Field(..., alias="task-result-callback-url")
-    access_token: SecretStr = Field(..., alias="access-token")
-    run_id: Optional[str] = Field(None, alias="run-id")
+    access_token: SecretStr
+    task_result_callback_url: HttpUrl
+    run_id: str
 
-    model_config = SettingsConfigDict(
+    model_config = ConfigDict(
         validate_default=True,
         populate_by_name=True,
         extra="ignore"
@@ -83,16 +82,19 @@ async def run_task(
         if not hmac.compare_digest(sig_header, expected):
             logger.warning("Invalid signature")
             raise HTTPException(status_code=401, detail="Invalid signature")
-    # Parse and validate payload (Terraform sends nested data.attributes)
+    # Parse and validate payload
     try:
-        body_json = json.loads(body_bytes)
-        attrs = body_json.get("data", {}).get("attributes")
-        if not isinstance(attrs, dict):
-            raise ValueError("Missing 'data.attributes' in payload")
-        payload = RunTaskPayload.parse_obj(attrs)
-    except (ValueError, ValidationError) as e:
-        logger.error("Payload validation error", exc_info=e)
-        raise HTTPException(status_code=422, detail="Invalid payload")
+        data = json.loads(body_bytes)
+        logger.debug("Parsed callback JSON: %s", data)
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON body", exc_info=e)
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    try:
+        payload = RunTaskPayload.parse_obj(data)
+    except ValidationError as e:
+        errors = e.errors()
+        logger.error("Payload validation errors: %s", errors)
+        raise HTTPException(status_code=422, detail=errors)
     # Enqueue background processing
     background_tasks.add_task(handle_task_result, payload)
     return JSONResponse(content={}, status_code=200)
@@ -181,7 +183,7 @@ async def dispatch_workflow_if_applicable(payload: RunTaskPayload) -> None:
 
 async def handle_task_result(payload: RunTaskPayload) -> None:
     try:
-        status, message = determine_status_and_message(payload.stage, payload.is_destroy)
+        status, message = determine_status_and_message(payload.stage, False)
         await post_task_result(
             payload.task_result_callback_url, payload.access_token, status, message
         )
