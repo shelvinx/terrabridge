@@ -41,14 +41,14 @@ async def shutdown_event():
 class RunTaskPayload(BaseModel):
     stage: str
     is_destroy: bool = Field(False, alias="is-destroy")
-    task_result_callback_url: HttpUrl
-    access_token: SecretStr
-    run_id: Optional[str] = Field(None, alias="run_id")
+    task_result_callback_url: HttpUrl = Field(..., alias="task-result-callback-url")
+    access_token: SecretStr = Field(..., alias="access-token")
+    run_id: Optional[str] = Field(None, alias="run-id")
 
     model_config = SettingsConfigDict(
         validate_default=True,
         populate_by_name=True,
-        extra="forbid"
+        extra="ignore"
     )
 
 # -------------------- Health Endpoints --------------------
@@ -83,10 +83,13 @@ async def run_task(
         if not hmac.compare_digest(sig_header, expected):
             logger.warning("Invalid signature")
             raise HTTPException(status_code=401, detail="Invalid signature")
-    # Parse and validate payload
+    # Parse and validate payload (Terraform sends nested data.attributes)
     try:
-        data = json.loads(body_bytes)
-        payload = RunTaskPayload.parse_obj(data)
+        body_json = json.loads(body_bytes)
+        attrs = body_json.get("data", {}).get("attributes")
+        if not isinstance(attrs, dict):
+            raise ValueError("Missing 'data.attributes' in payload")
+        payload = RunTaskPayload.parse_obj(attrs)
     except (ValueError, ValidationError) as e:
         logger.error("Payload validation error", exc_info=e)
         raise HTTPException(status_code=422, detail="Invalid payload")
