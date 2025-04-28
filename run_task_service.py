@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Optional, Tuple
 import httpx
-from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, Depends
+from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, Depends, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl, ValidationError, SecretStr, ConfigDict
 import json
@@ -55,9 +55,15 @@ class RunTaskPayload(BaseModel):
 async def health():
     return {"status": "ok"}
 
+@app.head("/", include_in_schema=False)
+async def root_head() -> Response:
+    return Response(status_code=200)
+
 @app.get("/run-task")
 async def ping():
     return {"status": "ready"}
+
+
 
 # -------------------- Main Endpoint --------------------
 @app.post("/run-task")
