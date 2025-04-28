@@ -8,6 +8,7 @@ Handle Terraform Cloud run-task webhooks and dispatch Ansible workflows via GitH
 - Post task results to Terraform Cloud
 - Dispatch GitHub Actions workflows for Ansible
 - Skip destroy runs automatically
+- Monitoring with New Relic
 
 ## Configuration
 Configure environment variables before running:
@@ -21,7 +22,7 @@ export PORT=3000
 
 ## Startup Command
 ```bash
-uvicorn run_task_service:app --host 0.0.0.0 --port ${PORT:-3000}
+NEW_RELIC_CONFIG_FILE=newrelic.ini newrelic-admin run-program uvicorn run_task_service:app --host 0.0.0.0 --port 3000
 ```
 
 ## Deployment
