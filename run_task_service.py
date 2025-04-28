@@ -7,7 +7,7 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl, ValidationError, SecretStr
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 import hmac
 import hashlib
 import json
