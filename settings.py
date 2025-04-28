@@ -1,7 +1,8 @@
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import BaseSettings, Field, HttpUrl, SecretStr, SettingsConfigDict, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, HttpUrl, SecretStr, field_validator
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", case_sensitive=False)
