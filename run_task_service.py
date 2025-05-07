@@ -179,8 +179,42 @@ async def ws_status(websocket: WebSocket):
     settings = app.state.settings
     client   = app.state.http_client
 
-    # send initial empty state so client can render placeholders
-    await websocket.send_json({})
+    # send initial data if available
+    initial_data = {}
+    
+    # Get terraform data if available
+    tf_payload = getattr(app.state, "last_payload", None)
+    if tf_payload:
+        try:
+            data = json.loads(tf_payload)
+            run_id = data.get("run_id")
+            # fetch TF details...
+            resp = await client.get(
+                f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
+                headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            attrs = body["data"]["attributes"]
+            included = body.get("included", [])
+            ws_name = next((i["attributes"]["name"] for i in included if i["type"]=="workspaces"), None)
+            initial_data.update({
+                "workspace_name": ws_name,
+                "action": attrs.get("run-action") or data.get("stage"),
+                "duration": attrs.get("apply-duration-seconds"),
+            })
+            last_tf = tf_payload
+        except Exception as e:
+            logger.exception("Error getting initial Terraform data")
+    
+    # Get GitHub job data if available
+    job_info = getattr(app.state, "latest_job", None)
+    if job_info:
+        initial_data.update(job_info)
+        last_job = job_info
+    
+    logger.info(f"WS: sending initial data: {initial_data}")
+    await websocket.send_json(initial_data)
 
     try:
         while True:
