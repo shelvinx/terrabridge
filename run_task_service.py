@@ -154,6 +154,47 @@ async def root(request: Request):
         },
     )
 
+@app.websocket("/ws")
+async def ws_status(websocket: WebSocket):
+    await websocket.accept()
+    last = None
+    settings = app.state.settings
+    client   = app.state.http_client
+    while True:
+        current = getattr(app.state, "last_payload", None)
+        if current and current != last:
+            data      = json.loads(current)
+            run_id    = data.get("run_id")
+            created_at= data.get("run_created_at")
+            created_by= data.get("run_created_by")
+            # Terraform API call
+            url = f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace"
+            resp = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"}
+            )
+            resp.raise_for_status()
+            body      = resp.json()
+            attrs     = body["data"]["attributes"]
+            included  = body.get("included", [])
+            workspace = next((i["attributes"]["name"] for i in included if i["type"]=="workspaces"), None)
+            action    = attrs.get("run-action") or data.get("stage")
+            duration  = attrs.get("apply-duration-seconds")
+            gr        = app.state.github_runs.get(str(run_id), {})
+            total     = gr.get("total",0); completed = gr.get("completed",0)
+            progress  = int(completed/total*100) if total else None
+            payload = {
+                "workspace_name": workspace,
+                "created_at":     created_at,
+                "created_by":     created_by,
+                "action":         action,
+                "duration":       duration,
+                "progress":       progress,
+            }
+            await websocket.send_json(payload)
+            last = current
+        await asyncio.sleep(1)
+    await websocket.close()
 
 @app.get("/events")
 async def events(request: Request):
