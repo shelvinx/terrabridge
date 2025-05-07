@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Optional, Tuple
 import httpx
-from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, Depends, Response
+from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, Depends, Response, WebSocket
 from fastapi.responses import (
     JSONResponse,
     FileResponse,
