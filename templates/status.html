@@ -1,4 +1,4 @@
-<!-- in templates/status.html -->
+<!-- file: templates/status.html -->
 <!DOCTYPE html>
 <html>
 <head>
@@ -18,17 +18,49 @@
     <p id="progress"></p>
     <p id="error" style="color:red;"></p>
   </div>
+
   <script>
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${location.host}/ws`);
-    ws.onmessage = e => {
-      const d = JSON.parse(e.data);
-      if (d.workspace_name) document.getElementById("workspace").textContent = "Workspace: " + d.workspace_name;
-      if (d.created_at)      document.getElementById("created-at").textContent = "Created at: " + d.created_at;
-      if (d.created_by)      document.getElementById("created-by").textContent = "Created by: " + d.created_by;
-      if (d.action)          document.getElementById("action").textContent = "Action: " + d.action;
-      if (d.duration)        document.getElementById("duration").textContent = "Duration: " + d.duration + "s";
-      if (d.progress !== null) document.getElementById("progress").textContent = "Progress: " + d.progress + "%";
+    const socketUrl = `${protocol}//${location.host}/ws`;
+    const ws = new WebSocket(socketUrl);
+
+    ws.onopen = () => {
+      console.log("WebSocket connection established");
+    };
+
+    ws.onmessage = event => {
+      const d = JSON.parse(event.data);
+      if (d.error) {
+        document.getElementById("error").textContent = "Error: " + d.error;
+        return;
+      }
+      if (d.workspace_name !== undefined) {
+        document.getElementById("workspace").textContent = "Workspace: " + d.workspace_name;
+      }
+      if (d.created_at !== undefined) {
+        document.getElementById("created-at").textContent = "Created at: " + d.created_at;
+      }
+      if (d.created_by !== undefined) {
+        document.getElementById("created-by").textContent = "Created by: " + d.created_by;
+      }
+      if (d.action !== undefined) {
+        document.getElementById("action").textContent = "Action: " + d.action;
+      }
+      if (d.duration !== undefined) {
+        document.getElementById("duration").textContent = "Duration: " + d.duration + "s";
+      }
+      if (d.progress !== undefined) {
+        document.getElementById("progress").textContent = "Progress: " + d.progress + "%";
+      }
+    };
+
+    ws.onerror = err => {
+      console.error("WebSocket error", err);
+      document.getElementById("error").textContent = "WebSocket error";
+    };
+
+    ws.onclose = () => {
+      console.log("WebSocket connection closed");
     };
   </script>
 </body>
