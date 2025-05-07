@@ -27,6 +27,7 @@ from settings import get_settings, Settings
 from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from redis.asyncio import Redis
 
 # -------------------- Logging --------------------
 logging.basicConfig(level=logging.INFO)
@@ -34,27 +35,27 @@ logger = logging.getLogger(__name__)
 
 
 # -------------------- FastAPI Setup --------------------
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Load settings
     try:
         settings = Settings()
     except ValidationError as e:
         missing = [err["loc"][0] for err in e.errors() if err["type"] == "missing"]
-        raise RuntimeError(
-            f"Missing required environment variables: {', '.join(missing)}"
-        )
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
     app.state.settings = settings
-    app.state.github_runs = {}
 
+    # Initialize Redis client
+    app.state.redis = Redis.from_url(settings.redis_url, decode_responses=True)
+
+    # Initialize HTTP client
     client = httpx.AsyncClient(timeout=10.0)
     app.state.http_client = client
-    try:
-        yield
-    finally:
-        await client.aclose()
 
+    yield
+
+    await client.aclose()
+    await app.state.redis.close()
 
 app = FastAPI(
     title="Terraform Run Task Endpoint",
@@ -62,78 +63,50 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
-def get_http_client(request: Request) -> httpx.AsyncClient:
-    return request.app.state.http_client  # pulled from lifespan
-
-
+# Mount static files and templates
 templates = Jinja2Templates(directory="templates")
-
-# Mount static directory
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
 
 # -------------------- Models --------------------
 class RunTaskPayload(BaseModel):
     payload_version: int
     stage: str
-    access_token: SecretStr
-    task_result_callback_url: HttpUrl
+    access_token: str
+    task_result_callback_url: str
     run_id: str
-
-    model_config = ConfigDict(
-        validate_default=True, populate_by_name=True, extra="ignore"
-    )
-
 
 # -------------------- Routes --------------------
 @app.get("/run-task")
 async def ping():
     return {"status": "ready"}
 
-
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
-    return Response("static/favicon.ico", media_type="image/x-icon")
-
-
-@app.get("/payload")
-async def get_payload(request: Request):
-    stored = getattr(request.app.state, "last_payload", None)
-    return {"payload": stored}
-
-
-# define health check endpoint
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response("/static/favicon.ico", media_type="image/x-icon")
+
+@app.get("/payload")
+async def get_payload(request: Request):
+    raw = await request.app.state.redis.get("last_payload")
+    return {"payload": raw}
 
 @app.get("/status")
 async def status(request: Request):
-    return {
-        "terraform": request.app.state.last_payload,
-        "workflow": getattr(request.app.state, "last_workflow_status", None),
-    }
+    tf = await request.app.state.redis.get("last_payload")
+    gh = await request.app.state.redis.get("latest_job")
+    return {"terraform": tf, "workflow": gh}
 
-
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def root(request: Request):
-    raw = getattr(request.app.state, "last_payload", None)
+    raw = await request.app.state.redis.get("last_payload")
     if not raw:
         return templates.TemplateResponse("status.html", {"request": request})
 
-    # grab http client
+    settings = request.app.state.settings
     client: httpx.AsyncClient = request.app.state.http_client
-
-    # load settings only now, fail-safe if missing
-    try:
-        settings: Settings = get_settings()
-    except ValidationError:
-        return templates.TemplateResponse(
-            "status.html", {"request": request, "error": "Service not configured"}
-        )
-
     data = json.loads(raw)
     run_id = data.get("run_id")
     created_at = data.get("run_created_at")
@@ -141,7 +114,8 @@ async def root(request: Request):
 
     url = f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace"
     resp = await client.get(
-        url, headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"}
+        url,
+        headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
     )
     try:
         resp.raise_for_status()
@@ -155,7 +129,8 @@ async def root(request: Request):
     attrs = body["data"]["attributes"]
     included = body.get("included", [])
     workspace_name = next(
-        (i["attributes"]["name"] for i in included if i["type"] == "workspaces"), None
+        (i["attributes"]["name"] for i in included if i["type"] == "workspaces"),
+        None,
     )
     action = attrs.get("run-action") or data.get("stage")
     return templates.TemplateResponse(
@@ -169,97 +144,100 @@ async def root(request: Request):
         },
     )
 
+@app.post("/run-task-callback")
+async def run_task_callback(request: Request):
+    body_bytes = await request.body()
+    payload = RunTaskPayload.parse_raw(body_bytes)
+
+    # Store raw payload
+    redis: Redis = request.app.state.redis
+    await redis.set("last_payload", body_bytes.decode())
+
+    # Optionally extract and store structured info
+    info = {
+        "stage": payload.stage,
+        "run_id": payload.run_id,
+    }
+    await redis.set("latest_job", json.dumps(info))
+
+    return {"status": "ok"}
+
+@app.post("/github-webhook")
+async def github_webhook(request: Request):
+    body = await request.json()
+    # Extract relevant fields from GitHub payload
+    info = {
+        "workflow": body.get("workflow_run", {}).get("name"),
+        "status": body.get("workflow_run", {}).get("conclusion"),
+    }
+    redis: Redis = request.app.state.redis
+    await redis.set("latest_job", json.dumps(info))
+    return {"status": "received"}
 
 @app.websocket("/ws")
 async def ws_status(websocket: WebSocket):
     await websocket.accept()
-    logger.info("WS: client connected")
-    last_tf  = None
-    last_job = None
+    redis: Redis = app.state.redis
+    client = app.state.http_client
     settings = app.state.settings
-    client   = app.state.http_client
 
-    # send initial data if available
-    initial_data = {}
-    
-    # Get terraform data if available
-    tf_payload = getattr(app.state, "last_payload", None)
-    if tf_payload:
-        try:
-            data = json.loads(tf_payload)
-            run_id = data.get("run_id")
-            # fetch TF details...
-            resp = await client.get(
-                f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
-                headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            attrs = body["data"]["attributes"]
-            included = body.get("included", [])
-            ws_name = next((i["attributes"]["name"] for i in included if i["type"]=="workspaces"), None)
-            initial_data.update({
-                "workspace_name": ws_name,
-                "action": attrs.get("run-action") or data.get("stage"),
-                "duration": attrs.get("apply-duration-seconds"),
-            })
-            last_tf = tf_payload
-        except Exception as e:
-            logger.exception("Error getting initial Terraform data")
-    
-    # Get GitHub job data if available
-    job_info = getattr(app.state, "latest_job", None)
-    if job_info:
-        initial_data.update(job_info)
-        last_job = job_info
-    
-    logger.info(f"WS: sending initial data: {initial_data}")
-    await websocket.send_json(initial_data)
+    last_tf = None
+    last_job = None
 
-    try:
-        while True:
-            tf_payload = getattr(app.state, "last_payload", None)
-            job_info   = getattr(app.state, "latest_job",    None)
+    # send initial data
+    raw = await redis.get("last_payload")
+    if raw:
+        data = json.loads(raw)
+        run_id = data.get("run_id")
+        resp = await client.get(
+            f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
+            headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        attrs = body["data"]["attributes"]
+        included = body.get("included", [])
+        ws_name = next(
+            (i["attributes"]["name"] for i in included if i["type"] == "workspaces"), None
+        )
+        await websocket.send_json({
+            "workspace_name": ws_name,
+            "action": attrs.get("run-action") or data.get("stage"),
+            "duration": attrs.get("apply-duration-seconds"),
+        })
+        last_tf = raw
+        last_job = await redis.get("latest_job")
 
-            if tf_payload != last_tf or job_info != last_job:
-                msg = {}
-
-                if tf_payload and tf_payload != last_tf:
-                    data   = json.loads(tf_payload)
-                    run_id = data.get("run_id")
-                    # fetch TF details...
-                    resp   = await client.get(
-                      f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
-                      headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
-                    )
-                    resp.raise_for_status()
-                    body    = resp.json()
-                    attrs   = body["data"]["attributes"]
-                    included= body.get("included", [])
-                    ws_name = next((i["attributes"]["name"] for i in included if i["type"]=="workspaces"), None)
-                    msg.update({
-                        "workspace_name": ws_name,
-                        "action":         attrs.get("run-action") or data.get("stage"),
-                        "duration":       attrs.get("apply-duration-seconds"),
-                    })
-                    last_tf = tf_payload
-
-                if job_info and job_info != last_job:
-                    msg.update(job_info)
-                    last_job = job_info
-
-                logger.info(f"WS: sending {msg}")
-                await websocket.send_json(msg)
-
-            await asyncio.sleep(1)
-
-    except WebSocketDisconnect:
-        logger.info("WS: client disconnected")
-    except Exception as e:
-        logger.exception("WS: unexpected error")
-        # optional: await websocket.close(code=1011)  
-    finally:
-        return
+    while True:
+        raw_new = await redis.get("last_payload")
+        job_new = await redis.get("latest_job")
+        if raw_new != last_tf or job_new != last_job:
+            update = {}
+            if raw_new != last_tf and raw_new:
+                data = json.loads(raw_new)
+                run_id = data.get("run_id")
+                resp = await client.get(
+                    f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
+                    headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                attrs = body["data"]["attributes"]
+                included = body.get("included", [])
+                ws_name = next(
+                    (i["attributes"]["name"] for i in included if i["type"] == "workspaces"), None
+                )
+                update.update({
+                    "workspace_name": ws_name,
+                    "action": attrs.get("run-action") or data.get("stage"),
+                    "duration": attrs.get("apply-duration-seconds"),
+                })
+                last_tf = raw_new
+            if job_new != last_job and job_new:
+                update.update(json.loads(job_new))
+                last_job = job_new
+            await websocket.send_json(update)
+        await asyncio.sleep(0.25)
 
 
 @app.post("/github-webhook")
@@ -288,7 +266,8 @@ async def github_webhook(
             "started_at": job["started_at"],
             "completed_at": job["completed_at"],
         }
-        request.app.state.latest_job = info
+        redis: Redis = request.app.state.redis
+        await redis.set("latest_job", json.dumps(info))
 
     return {}
 
@@ -303,7 +282,7 @@ async def run_task(
 ):
     # Read raw body for signature
     body_bytes = await request.body()
-    request.app.state.last_payload = body_bytes
+    await redis.get("last_payload")
     sig_header = request.headers.get("X-TFC-Task-Signature")
     # Verify HMAC signature if configured
     if settings.hmac_key:
