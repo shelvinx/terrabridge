@@ -173,56 +173,59 @@ async def root(request: Request):
 @app.websocket("/ws")
 async def ws_status(websocket: WebSocket):
     await websocket.accept()
-    last_tf = None
+    logger.info("WS: client connected")
+    last_tf  = None
     last_job = None
     settings = app.state.settings
-    client = app.state.http_client
+    client   = app.state.http_client
 
-    while True:
-        tf_payload = getattr(app.state, "last_payload", None)
-        job_info = getattr(app.state, "latest_job", None)
+    # send initial empty state so client can render placeholders
+    await websocket.send_json({})
 
-        if tf_payload != last_tf or job_info != last_job:
-            msg = {}
+    try:
+        while True:
+            tf_payload = getattr(app.state, "last_payload", None)
+            job_info   = getattr(app.state, "latest_job",    None)
 
-            if tf_payload and tf_payload != last_tf:
-                data = json.loads(tf_payload)
-                run_id = data.get("run_id")
-                tf_url = f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace"
-                resp = await client.get(
-                    tf_url,
-                    headers={
-                        "Authorization": f"Bearer {settings.tf_token.get_secret_value()}"
-                    },
-                )
-                resp.raise_for_status()
-                body = resp.json()
-                attrs = body["data"]["attributes"]
-                included = body.get("included", [])
-                ws_name = next(
-                    (
-                        i["attributes"]["name"]
-                        for i in included
-                        if i["type"] == "workspaces"
-                    ),
-                    None,
-                )
-                msg.update(
-                    {
+            if tf_payload != last_tf or job_info != last_job:
+                msg = {}
+
+                if tf_payload and tf_payload != last_tf:
+                    data   = json.loads(tf_payload)
+                    run_id = data.get("run_id")
+                    # fetch TF details...
+                    resp   = await client.get(
+                      f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
+                      headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
+                    )
+                    resp.raise_for_status()
+                    body    = resp.json()
+                    attrs   = body["data"]["attributes"]
+                    included= body.get("included", [])
+                    ws_name = next((i["attributes"]["name"] for i in included if i["type"]=="workspaces"), None)
+                    msg.update({
                         "workspace_name": ws_name,
-                        "action": attrs.get("run-action") or data.get("stage"),
-                        "duration": attrs.get("apply-duration-seconds"),
-                    }
-                )
-                last_tf = tf_payload
+                        "action":         attrs.get("run-action") or data.get("stage"),
+                        "duration":       attrs.get("apply-duration-seconds"),
+                    })
+                    last_tf = tf_payload
 
-            if job_info and job_info != last_job:
-                msg.update(job_info)
-                last_job = job_info
+                if job_info and job_info != last_job:
+                    msg.update(job_info)
+                    last_job = job_info
 
-            await websocket.send_json(msg)
+                logger.info(f"WS: sending {msg}")
+                await websocket.send_json(msg)
 
-        await asyncio.sleep(1)
+            await asyncio.sleep(1)
+
+    except WebSocketDisconnect:
+        logger.info("WS: client disconnected")
+    except Exception as e:
+        logger.exception("WS: unexpected error")
+        # optional: await websocket.close(code=1011)  
+    finally:
+        return
 
 
 @app.post("/github-webhook")
