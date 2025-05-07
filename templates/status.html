@@ -8,60 +8,34 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="container">
-    <h1>Terraform Run Task Status</h1>
-    <p id="workspace"></p>
-    <p id="created-at"></p>
-    <p id="created-by"></p>
-    <p id="action"></p>
-    <p id="duration"></p>
-    <p id="progress"></p>
-    <p id="error" style="color:red;"></p>
-  </div>
-
-  <script>
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const socketUrl = `${protocol}//${location.host}/ws`;
-    const ws = new WebSocket(socketUrl);
-
-    ws.onopen = () => {
-      console.log("WebSocket connection established");
-    };
-
-    ws.onmessage = event => {
-      const d = JSON.parse(event.data);
-      if (d.error) {
-        document.getElementById("error").textContent = "Error: " + d.error;
-        return;
-      }
-      if (d.workspace_name !== undefined) {
-        document.getElementById("workspace").textContent = "Workspace: " + d.workspace_name;
-      }
-      if (d.created_at !== undefined) {
-        document.getElementById("created-at").textContent = "Created at: " + d.created_at;
-      }
-      if (d.created_by !== undefined) {
-        document.getElementById("created-by").textContent = "Created by: " + d.created_by;
-      }
-      if (d.action !== undefined) {
-        document.getElementById("action").textContent = "Action: " + d.action;
-      }
-      if (d.duration !== undefined) {
-        document.getElementById("duration").textContent = "Duration: " + d.duration + "s";
-      }
-      if (d.progress !== undefined) {
-        document.getElementById("progress").textContent = "Progress: " + d.progress + "%";
-      }
-    };
-
-    ws.onerror = err => {
-      console.error("WebSocket error", err);
-      document.getElementById("error").textContent = "WebSocket error";
-    };
-
-    ws.onclose = () => {
-      console.log("WebSocket connection closed");
-    };
-  </script>
-</body>
-</html>
+    <div class="container">
+      <h1>Terraform Run Task Status</h1>
+      <p id="workspace"></p>
+      <p id="action"></p>
+      <p id="duration"></p>
+      <h2>Ansible workflow job</h2>
+      <p id="workflow-name"></p>
+      <p id="started-at"></p>
+      <p id="completed-at"></p>
+      <p id="error" style="color:red;"></p>
+    </div>
+    <script>
+      import initWebSocket from "/static/ws-client.js";
+      initWebSocket({
+        onMessage: d => {
+          if (d.error) {
+            document.getElementById("error").textContent = d.error;
+            return;
+          }
+          if (d.workspace_name) document.getElementById("workspace").textContent = "Workspace: " + d.workspace_name;
+          if (d.action)         document.getElementById("action").textContent    = "Action: " + d.action;
+          if (d.duration)       document.getElementById("duration").textContent  = "Duration: " + d.duration + "s";
+  
+          if (d.workflow_name)  document.getElementById("workflow-name").textContent = "Workflow: " + d.workflow_name;
+          if (d.started_at)     document.getElementById("started-at").textContent    = "Started: "  + d.started_at;
+          if (d.completed_at)   document.getElementById("completed-at").textContent  = "Completed: "+ d.completed_at;
+        }
+      });
+    </script>
+  </body>
+  </html>
