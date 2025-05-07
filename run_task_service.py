@@ -5,39 +5,60 @@ import os
 from typing import Optional, Tuple
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, Depends, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import (
+    JSONResponse,
+    FileResponse,
+    HTMLResponse,
+    StreamingResponse,
+)
 from pydantic import BaseModel, Field, HttpUrl, ValidationError, SecretStr, ConfigDict
 import json
 import hmac
 import hashlib
 from settings import get_settings, Settings
+from contextlib import asynccontextmanager
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+import asyncio
 
 # -------------------- Logging --------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 # -------------------- FastAPI Setup --------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        settings = Settings()
+    except ValidationError as e:
+        missing = [err["loc"][0] for err in e.errors() if err["type"] == "missing"]
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+    app.state.settings = settings
+    app.state.github_runs = {}
+
+    client = httpx.AsyncClient(timeout=10.0)
+    app.state.http_client = client
+    try:
+        yield
+    finally:
+        await client.aclose()
+
 app = FastAPI(
     title="Terraform Run Task Endpoint",
     description="Handles Terraform Cloud run-task webhooks and dispatches Ansible via GitHub Actions.",
+    lifespan=lifespan
 )
 
-# startup/shutdown lifecycle for httpx client & settings
-client: httpx.AsyncClient
-settings: Settings
+def get_http_client(request: Request) -> httpx.AsyncClient:
+    return request.app.state.http_client  # pulled from lifespan
 
 
-@app.on_event("startup")
-async def startup_event():
-    global client, settings
-    client = httpx.AsyncClient(timeout=10.0)
-    settings = get_settings()
+templates = Jinja2Templates(directory="templates")
 
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await client.aclose()
-
+# Mount static directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # -------------------- Models --------------------
 class RunTaskPayload(BaseModel):
@@ -52,20 +73,241 @@ class RunTaskPayload(BaseModel):
     )
 
 
-# -------------------- Health Endpoints --------------------
-@app.get("/")
+# -------------------- Routes --------------------
+@app.get("/run-task")
+async def ping():
+    return {"status": "ready"}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response("static/favicon.ico", media_type="image/x-icon")
+
+
+@app.get("/payload")
+async def get_payload(request: Request):
+    stored = getattr(request.app.state, "last_payload", None)
+    return {"payload": stored}
+
+
+# define health check endpoint
+@app.get("/health")
 async def health():
     return {"status": "ok"}
 
 
-@app.head("/", include_in_schema=False)
-async def root_head() -> Response:
-    return Response(status_code=200)
+@app.get("/status")
+async def status(request: Request):
+    return {
+        "terraform": request.app.state.last_payload,
+        "workflow": getattr(request.app.state, "last_workflow_status", None),
+    }
+
+@app.get("/", response_class=HTMLResponse)
+async def root(request: Request):
+    raw = getattr(request.app.state, "last_payload", None)
+    if not raw:
+        return templates.TemplateResponse("status.html", {"request": request})
+
+    # grab http client
+    client: httpx.AsyncClient = request.app.state.http_client
+
+    # load settings only now, fail-safe if missing
+    try:
+        settings: Settings = get_settings()
+    except ValidationError:
+        return templates.TemplateResponse(
+            "status.html", {"request": request, "error": "Service not configured"}
+        )
+
+    data = json.loads(raw)
+    run_id = data.get("run_id")
+    created_at = data.get("run_created_at")
+    created_by = data.get("run_created_by")
+
+    url = f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace"
+    resp = await client.get(
+        url, headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"}
+    )
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        return templates.TemplateResponse(
+            "status.html",
+            {"request": request, "error": f"Failed fetch: {e.response.status_code}"},
+        )
+
+    body = resp.json()
+    attrs = body["data"]["attributes"]
+    included = body.get("included", [])
+    workspace_name = next(
+        (i["attributes"]["name"] for i in included if i["type"] == "workspaces"), None
+    )
+    action = attrs.get("run-action") or data.get("stage")
+    return templates.TemplateResponse(
+        "status.html",
+        {
+            "request": request,
+            "workspace_name": workspace_name,
+            "created_at": created_at,
+            "created_by": created_by,
+            "action": action,
+        },
+    )
 
 
-@app.get("/run-task")
-async def ping():
-    return {"status": "ready"}
+@app.get("/events")
+async def events(request: Request):
+    # Define a simpler event generator with proper cleanup
+    async def event_generator():
+        # One-time settings validation at startup
+        try:
+            settings = get_settings()
+        except ValidationError:
+            yield 'data: {"error":"Service not configured"}\n\n'
+            return
+
+        # Track state for change detection
+        last_payload = None
+        # Ensure the connection doesn't hang forever
+        max_lifetime = 60  # seconds
+        start_time = asyncio.get_event_loop().time()
+        # Use a shorter sleep interval for faster shutdown
+        sleep_interval = 0.5  # seconds
+        
+        # Keep client connected until disconnected, timeout, or server shutdown
+        try:
+            while True:
+                # Check for client disconnect or timeout
+                if await request.is_disconnected():
+                    logger.debug("Client disconnected from /events")
+                    break
+                if asyncio.get_event_loop().time() - start_time > max_lifetime:
+                    logger.debug("SSE connection max lifetime reached")
+                    break
+                
+                # Get current payload and check for changes
+                current = getattr(request.app.state, "last_payload", None)
+                if current != last_payload and current is not None:
+                    try:
+                        # Parse the payload
+                        data = json.loads(current) if current else {}
+                        run_id = data.get("run_id")
+                        
+                        # Default empty event
+                        event = {"timestamp": asyncio.get_event_loop().time()}
+                        
+                        if run_id:  # Only fetch additional data if we have a run_id
+                            # Extract basic info from payload
+                            event.update({
+                                "created_at": data.get("run_created_at"),
+                                "created_by": data.get("run_created_by"),
+                            })
+                            
+                            # Fetch additional Terraform details
+                            tf_url = f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace"
+                            async with httpx.AsyncClient(timeout=5.0) as temp_client:
+                                tf_resp = await temp_client.get(
+                                    tf_url,
+                                    headers={
+                                        "Authorization": f"Bearer {settings.tf_token.get_secret_value()}"
+                                    },
+                                )
+                                tf_resp.raise_for_status()
+                                body = tf_resp.json()
+                                attrs = body["data"]["attributes"]
+                                included = body.get("included", [])
+                                
+                                # Extract relevant data
+                                workspace_name = next(
+                                    (i["attributes"]["name"] for i in included if i["type"] == "workspaces"),
+                                    None,
+                                )
+                                action = attrs.get("run-action") or data.get("stage")
+                                duration = attrs.get("apply-duration-seconds")
+                                
+                                # Add to event
+                                event.update({
+                                    "workspace_name": workspace_name,
+                                    "action": action,
+                                    "duration": duration,
+                                })
+                            
+                            # Get GitHub progress if available
+                            gr = request.app.state.github_runs.get(str(run_id), {})
+                            total = gr.get("total") or 0
+                            completed = gr.get("completed") or 0
+                            if total > 0:
+                                event["progress"] = int(completed / total * 100)
+                        
+                        # Send the event
+                        yield f"data: {json.dumps(event)}\n\n"
+                        last_payload = current
+                    except Exception as e:
+                        # Log error and send to client
+                        logger.exception("Error generating event")
+                        yield f'data: {{"error": "{str(e)}"}}\n\n'
+                
+                # Wait before checking again
+                await asyncio.sleep(sleep_interval)
+        except asyncio.CancelledError:
+            # Handle server shutdown gracefully
+            logger.debug("SSE connection cancelled during shutdown")
+            return
+        except Exception as e:
+            # Log any unexpected errors
+            logger.exception("Unexpected error in SSE connection")
+            yield f'data: {{"error": "Connection error: {str(e)}"}}\n\n'
+            return
+            
+    # Use a dedicated media type for SSE
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+    )
+
+
+@app.post("/github-webhook")
+async def github_webhook(request: Request):
+    signature = request.headers.get("X-Hub-Signature-256")
+    body = await request.body()
+    if settings.github_webhook_secret:
+        mac = hmac.new(
+            settings.github_webhook_secret.get_secret_value().encode(),
+            body,
+            hashlib.sha256,
+        )
+        if not hmac.compare_digest("sha256=" + mac.hexdigest(), signature or ""):
+            raise HTTPException(401)
+    event = request.headers.get("X-GitHub-Event")
+    data = json.loads(body)
+    if event == "workflow_job":
+        run_id = str(data["workflow_job"]["run_id"])
+        job_id = data["workflow_job"]["id"]
+        status = data["workflow_job"]["status"]
+        runs = request.app.state.github_runs
+        info = runs.setdefault(run_id, {"total": None, "completed": 0, "jobs": {}})
+        info["jobs"][job_id] = status
+        if status == "completed":
+            info["completed"] = sum(
+                1 for s in info["jobs"].values() if s == "completed"
+            )
+        if info["total"] is None:
+            owner, repo_name = settings.github_repository.split("/")
+            url = f"https://api.github.com/repos/{owner}/{repo_name}/actions/runs/{run_id}/jobs"
+            resp = await request.app.state.http_client.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {settings.gh_token.get_secret_value()}"
+                },
+            )
+            resp.raise_for_status()
+            info["total"] = resp.json()["total_count"]
+    return {}
 
 
 # -------------------- Main Endpoint --------------------
@@ -73,10 +315,12 @@ async def ping():
 async def run_task(
     request: Request,
     background_tasks: BackgroundTasks,
+    client: httpx.AsyncClient = Depends(get_http_client),
     settings: Settings = Depends(get_settings),
-) -> JSONResponse:
+):
     # Read raw body for signature
     body_bytes = await request.body()
+    request.app.state.last_payload = body_bytes
     sig_header = request.headers.get("X-TFC-Task-Signature")
     # Verify HMAC signature if configured
     if settings.hmac_key:
@@ -103,8 +347,20 @@ async def run_task(
         logger.error("Payload validation errors: %s", errors)
         raise HTTPException(status_code=422, detail=errors)
     # Enqueue background processing
-    background_tasks.add_task(handle_task_result, payload)
-    return JSONResponse(content={}, status_code=200)
+    background_tasks.add_task(handle_task_result, payload, client, settings)
+    return JSONResponse(status_code=200, content={})
+
+
+@app.post("/workflow-callback")
+async def workflow_callback(request: Request):
+    event = await request.json()
+    # extract repository, workflow_run details
+    request.app.state.last_workflow_status = {
+        "name": event["workflow_run"]["name"],
+        "status": event["workflow_run"]["status"],
+        "conclusion": event["workflow_run"].get("conclusion"),
+    }
+    return {}
 
 
 # -------------------- Helper Functions --------------------
@@ -121,6 +377,7 @@ async def post_task_result(
     access_token: SecretStr,
     status: str,
     message: str,
+    client: httpx.AsyncClient,
 ) -> None:
     payload = {
         "data": {
@@ -128,27 +385,21 @@ async def post_task_result(
             "attributes": {"status": status, "message": message},
         }
     }
-    # Ensure URL is str
     url_str = str(callback_url)
-    masked = (
-        access_token.get_secret_value()[:4]
-        + "..."
-        + access_token.get_secret_value()[-4:]
-    )
-    logger.debug(f"Posting result to callback: {payload}")
-    logger.debug(f"Callback URL: {url_str}")
-    logger.debug(f"Using access_token: {masked}")
     headers = {
         "Authorization": f"Bearer {access_token.get_secret_value()}",
         "Content-Type": "application/vnd.api+json",
     }
-    resp = await client.patch(url_str, json=payload, headers=headers)  # type: ignore
-    logger.debug(f"Callback PATCH status: {resp.status_code}, body: {resp.text}")
+    resp = await client.patch(url_str, json=payload, headers=headers)
     if resp.status_code != 200:
         logger.error(f"Callback PATCH failed: {resp.status_code} - {resp.text}")
 
 
-async def dispatch_workflow_if_applicable(payload: RunTaskPayload) -> None:
+async def dispatch_workflow_if_applicable(
+    payload: RunTaskPayload,
+    client: httpx.AsyncClient,
+    settings: Settings,
+) -> None:
     if payload.stage != "post_apply":
         return
     # Check actual run type from Terraform API to skip destroys
@@ -162,6 +413,7 @@ async def dispatch_workflow_if_applicable(payload: RunTaskPayload) -> None:
         )
         if resp2.status_code == 200:
             attrs = resp2.json()["data"]["attributes"]
+
             is_destroy_api = attrs.get("is-destroy", False)
             logger.debug(f"Run {run_id} is-destroy (from API): {is_destroy_api}")
             if is_destroy_api:
@@ -189,7 +441,7 @@ async def dispatch_workflow_if_applicable(payload: RunTaskPayload) -> None:
         owner, repo_name = repo.split("/")
     except ValueError:
         logger.error(f"Invalid GITHUB_REPOSITORY format: {repo}")
-        return
+        raise HTTPException(status_code=400, detail="Invalid GITHUB_REPOSITORY format")
     dispatch_url = (
         f"https://api.github.com/repos/{owner}/{repo_name}/actions/workflows/"
         f"{settings.github_workflow_file}/dispatches"
@@ -207,13 +459,21 @@ async def dispatch_workflow_if_applicable(payload: RunTaskPayload) -> None:
         logger.error(f"Dispatch failed: {resp.status_code} - {resp.text}")
 
 
-async def handle_task_result(payload: RunTaskPayload) -> None:
+async def handle_task_result(
+    payload: RunTaskPayload,
+    client: httpx.AsyncClient,
+    settings: Settings,
+) -> None:
     try:
         status, message = determine_status_and_message(payload.stage, False)
         await post_task_result(
-            payload.task_result_callback_url, payload.access_token, status, message
+            payload.task_result_callback_url,
+            payload.access_token,
+            status,
+            message,
+            client,
         )
-        await dispatch_workflow_if_applicable(payload)
+        await dispatch_workflow_if_applicable(payload, client, settings)
     except Exception:
         logger.exception("Error handling task result")
 

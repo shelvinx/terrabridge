@@ -2,7 +2,7 @@ from functools import lru_cache
 from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, HttpUrl, SecretStr, field_validator
+from pydantic import Field, HttpUrl, SecretStr, field_validator, ValidationError
 
 
 class Settings(BaseSettings):
@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     )
     github_ref: str = Field(default="main", env="GITHUB_REF")
     hmac_key: Optional[SecretStr] = Field(None, env="HMAC_KEY")
+    github_webhook_secret: Optional[SecretStr] = Field(
+        None, env="GITHUB_WEBHOOK_SECRET"
+    )
 
     @field_validator("github_repository")
     def validate_repo_format(cls, v: str) -> str:
