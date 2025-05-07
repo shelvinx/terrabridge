@@ -173,59 +173,64 @@ async def root(request: Request):
 @app.websocket("/ws")
 async def ws_status(websocket: WebSocket):
     await websocket.accept()
-    last = None
+    last_tf = None
+    last_job = None
     settings = app.state.settings
     client = app.state.http_client
+
     while True:
-        current = getattr(app.state, "last_payload", None)
-        if current and current != last:
-            data = json.loads(current)
-            run_id = data.get("run_id")
-            created_at = data.get("run_created_at")
-            created_by = data.get("run_created_by")
-            # Terraform API call
-            url = f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace"
-            resp = await client.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {settings.tf_token.get_secret_value()}"
-                },
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            attrs = body["data"]["attributes"]
-            included = body.get("included", [])
-            workspace = next(
-                (
-                    i["attributes"]["name"]
-                    for i in included
-                    if i["type"] == "workspaces"
-                ),
-                None,
-            )
-            action = attrs.get("run-action") or data.get("stage")
-            duration = attrs.get("apply-duration-seconds")
-            gr = app.state.github_runs.get(str(run_id), {})
-            total = gr.get("total", 0)
-            completed = gr.get("completed", 0)
-            progress = int(completed / total * 100) if total else None
-            payload = {
-                "workspace_name": workspace,
-                "created_at": created_at,
-                "created_by": created_by,
-                "action": action,
-                "duration": duration,
-                "progress": progress,
-            }
-            await websocket.send_json(payload)
-            last = current
+        tf_payload = getattr(app.state, "last_payload", None)
+        job_info = getattr(app.state, "latest_job", None)
+
+        if tf_payload != last_tf or job_info != last_job:
+            msg = {}
+
+            if tf_payload and tf_payload != last_tf:
+                data = json.loads(tf_payload)
+                run_id = data.get("run_id")
+                tf_url = f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace"
+                resp = await client.get(
+                    tf_url,
+                    headers={
+                        "Authorization": f"Bearer {settings.tf_token.get_secret_value()}"
+                    },
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                attrs = body["data"]["attributes"]
+                included = body.get("included", [])
+                ws_name = next(
+                    (
+                        i["attributes"]["name"]
+                        for i in included
+                        if i["type"] == "workspaces"
+                    ),
+                    None,
+                )
+                msg.update(
+                    {
+                        "workspace_name": ws_name,
+                        "action": attrs.get("run-action") or data.get("stage"),
+                        "duration": attrs.get("apply-duration-seconds"),
+                    }
+                )
+                last_tf = tf_payload
+
+            if job_info and job_info != last_job:
+                msg.update(job_info)
+                last_job = job_info
+
+            await websocket.send_json(msg)
+
         await asyncio.sleep(1)
-    await websocket.close()
 
 
 @app.post("/github-webhook")
-async def github_webhook(request: Request, settings: Settings = Depends(get_settings)):
-    signature = request.headers.get("X-Hub-Signature-256")
+async def github_webhook(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+):
+    signature = request.headers.get("X-Hub-Signature-256", "")
     body = await request.body()
     if settings.github_webhook_secret:
         mac = hmac.new(
@@ -233,32 +238,21 @@ async def github_webhook(request: Request, settings: Settings = Depends(get_sett
             body,
             hashlib.sha256,
         )
-        if not hmac.compare_digest("sha256=" + mac.hexdigest(), signature or ""):
-            raise HTTPException(401)
-    event = request.headers.get("X-GitHub-Event")
+        if not hmac.compare_digest("sha256=" + mac.hexdigest(), signature):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+    event = request.headers.get("X-GitHub-Event", "")
     data = json.loads(body)
+
     if event == "workflow_job":
-        run_id = str(data["workflow_job"]["run_id"])
-        job_id = data["workflow_job"]["id"]
-        status = data["workflow_job"]["status"]
-        runs = request.app.state.github_runs
-        info = runs.setdefault(run_id, {"total": None, "completed": 0, "jobs": {}})
-        info["jobs"][job_id] = status
-        if status == "completed":
-            info["completed"] = sum(
-                1 for s in info["jobs"].values() if s == "completed"
-            )
-        if info["total"] is None:
-            owner, repo_name = settings.github_repository.split("/")
-            url = f"https://api.github.com/repos/{owner}/{repo_name}/actions/runs/{run_id}/jobs"
-            resp = await request.app.state.http_client.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {settings.gh_token.get_secret_value()}"
-                },
-            )
-            resp.raise_for_status()
-            info["total"] = resp.json()["total_count"]
+        job = data["workflow_job"]
+        info = {
+            "workflow_name": job["workflow_name"],
+            "started_at": job["started_at"],
+            "completed_at": job["completed_at"],
+        }
+        request.app.state.latest_job = info
+
     return {}
 
 
