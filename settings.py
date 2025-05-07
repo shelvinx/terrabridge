@@ -4,6 +4,7 @@ from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, HttpUrl, SecretStr, field_validator
 
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", case_sensitive=False)
 
@@ -11,7 +12,9 @@ class Settings(BaseSettings):
     tf_token: SecretStr = Field(..., env="TF_TOKEN")
     gh_token: SecretStr = Field(..., env="GH_TOKEN")
     github_repository: str = Field(..., env="GITHUB_REPOSITORY")
-    github_workflow_file: str = Field(default="ansible-runner.yml", env="GITHUB_WORKFLOW_FILE")
+    github_workflow_file: str = Field(
+        default="ansible-runner.yml", env="GITHUB_WORKFLOW_FILE"
+    )
     github_ref: str = Field(default="main", env="GITHUB_REF")
     hmac_key: Optional[SecretStr] = Field(None, env="HMAC_KEY")
 
@@ -20,6 +23,7 @@ class Settings(BaseSettings):
         if "/" not in v:
             raise ValueError(f"Invalid GITHUB_REPOSITORY format: {v}")
         return v
+
 
 @lru_cache()
 def get_settings() -> Settings:
