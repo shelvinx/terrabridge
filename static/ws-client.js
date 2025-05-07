@@ -23,6 +23,10 @@ export default function initWebSocket({ onMessage }) {
       console.log('WebSocket message received:', e.data);
       try {
         const data = JSON.parse(e.data);
+        // Ensure this message is handled as a data update, not just a connection status
+        if (Object.keys(data).length > 0) {
+          console.log('Processing data update:', data);
+        }
         onMessage(data);
       } catch (err) {
         console.error('Error parsing WebSocket message:', err);

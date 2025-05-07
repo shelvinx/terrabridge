@@ -39,7 +39,7 @@
       // Initialize WebSocket and store the returned methods
       const wsConnection = initWebSocket({
         onMessage: data => {
-          console.log('WebSocket message received:', data);
+          console.log('WebSocket message received in handler:', data);
           
           // Handle connection status updates
           if (data.status) {
@@ -62,15 +62,62 @@
             return;
           }
           
-          // Update Terraform data
-          if (data.workspace_name) document.getElementById("workspace").textContent = "Workspace: " + data.workspace_name;
-          if (data.action)         document.getElementById("action").textContent    = "Action: " + data.action;
-          if (data.duration)       document.getElementById("duration").textContent  = "Duration: " + data.duration + "s";
-          
-          // Update Ansible workflow job data
-          if (data.workflow_name)  document.getElementById("workflow-name").textContent = "Workflow: " + data.workflow_name;
-          if (data.started_at)     document.getElementById("started-at").textContent    = "Started: "  + data.started_at;
-          if (data.completed_at)   document.getElementById("completed-at").textContent  = "Completed: "+ data.completed_at;
+          // Update Terraform data with better error handling
+          try {
+            if (data.workspace_name) {
+              const workspaceEl = document.getElementById("workspace");
+              workspaceEl.textContent = "Workspace: " + data.workspace_name; 
+              workspaceEl.style.display = 'block';
+            }
+            
+            if (data.action) {
+              const actionEl = document.getElementById("action");
+              actionEl.textContent = "Action: " + data.action;
+              actionEl.style.display = 'block';
+            }
+            
+            if (data.duration) {
+              const durationEl = document.getElementById("duration");
+              durationEl.textContent = "Duration: " + data.duration + "s";
+              durationEl.style.display = 'block';
+            }
+            
+            // Update Ansible workflow job data with better error handling
+            if (data.workflow_name) {
+              const workflowEl = document.getElementById("workflow-name");
+              workflowEl.textContent = "Workflow: " + data.workflow_name;
+              workflowEl.style.display = 'block';
+            }
+            
+            if (data.started_at) {
+              const startedEl = document.getElementById("started-at");
+              startedEl.textContent = "Started: " + data.started_at;
+              startedEl.style.display = 'block';
+            }
+            
+            if (data.completed_at) {
+              const completedEl = document.getElementById("completed-at");
+              completedEl.textContent = "Completed: " + data.completed_at;
+              completedEl.style.display = 'block';
+            }
+            
+            // Force a re-render by updating a timestamp indicator
+            const timeIndicator = document.createElement('div');
+            timeIndicator.id = 'last-update';
+            timeIndicator.style.fontSize = 'small';
+            timeIndicator.style.color = '#666';
+            timeIndicator.textContent = 'Last update: ' + new Date().toLocaleTimeString();
+            
+            const existingIndicator = document.getElementById('last-update');
+            if (existingIndicator) {
+              existingIndicator.replaceWith(timeIndicator);
+            } else {
+              document.querySelector('.data-container').appendChild(timeIndicator);
+            }
+          } catch (error) {
+            console.error('Error updating UI with WebSocket data:', error);
+            errorElement.textContent = 'Error updating UI: ' + error.message;
+          }
         }
       });
       
