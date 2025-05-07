@@ -10,31 +10,76 @@
 <body>
     <div class="container">
       <h1>Terraform Run Task Status</h1>
-      <p id="workspace"></p>
-      <p id="action"></p>
-      <p id="duration"></p>
-      <h2>Ansible workflow job</h2>
-      <p id="workflow-name"></p>
-      <p id="started-at"></p>
-      <p id="completed-at"></p>
-      <p id="error" style="color:red;"></p>
+      <div class="status-container">
+        <p id="connection-status">Connection Status: Connecting...</p>
+        <button id="reconnect-btn" style="display:none;">Reconnect</button>
+      </div>
+      <div class="data-container">
+        <h2>Terraform Data</h2>
+        <p id="workspace"></p>
+        <p id="action"></p>
+        <p id="duration"></p>
+        <h2>Ansible Workflow Job</h2>
+        <p id="workflow-name"></p>
+        <p id="started-at"></p>
+        <p id="completed-at"></p>
+      </div>
+      <div class="error-container">
+        <p id="error" style="color:red;"></p>
+      </div>
     </div>
-    <script>
+    <script type="module">
       import initWebSocket from "/static/ws-client.js";
-      initWebSocket({
-        onMessage: d => {
-          if (d.error) {
-            document.getElementById("error").textContent = d.error;
+      
+      // Get DOM elements
+      const connectionStatus = document.getElementById('connection-status');
+      const reconnectBtn = document.getElementById('reconnect-btn');
+      const errorElement = document.getElementById('error');
+      
+      // Initialize WebSocket and store the returned methods
+      const wsConnection = initWebSocket({
+        onMessage: data => {
+          console.log('WebSocket message received:', data);
+          
+          // Handle connection status updates
+          if (data.status) {
+            if (data.status === 'connected') {
+              connectionStatus.textContent = 'Connection Status: Connected';
+              connectionStatus.style.color = 'green';
+              reconnectBtn.style.display = 'none';
+              errorElement.textContent = '';
+            } else if (data.status === 'disconnected') {
+              connectionStatus.textContent = 'Connection Status: Disconnected';
+              connectionStatus.style.color = 'red';
+              reconnectBtn.style.display = 'inline-block';
+            }
             return;
           }
-          if (d.workspace_name) document.getElementById("workspace").textContent = "Workspace: " + d.workspace_name;
-          if (d.action)         document.getElementById("action").textContent    = "Action: " + d.action;
-          if (d.duration)       document.getElementById("duration").textContent  = "Duration: " + d.duration + "s";
-  
-          if (d.workflow_name)  document.getElementById("workflow-name").textContent = "Workflow: " + d.workflow_name;
-          if (d.started_at)     document.getElementById("started-at").textContent    = "Started: "  + d.started_at;
-          if (d.completed_at)   document.getElementById("completed-at").textContent  = "Completed: "+ d.completed_at;
+          
+          // Handle error messages
+          if (data.error) {
+            errorElement.textContent = data.error;
+            return;
+          }
+          
+          // Update Terraform data
+          if (data.workspace_name) document.getElementById("workspace").textContent = "Workspace: " + data.workspace_name;
+          if (data.action)         document.getElementById("action").textContent    = "Action: " + data.action;
+          if (data.duration)       document.getElementById("duration").textContent  = "Duration: " + data.duration + "s";
+          
+          // Update Ansible workflow job data
+          if (data.workflow_name)  document.getElementById("workflow-name").textContent = "Workflow: " + data.workflow_name;
+          if (data.started_at)     document.getElementById("started-at").textContent    = "Started: "  + data.started_at;
+          if (data.completed_at)   document.getElementById("completed-at").textContent  = "Completed: "+ data.completed_at;
         }
+      });
+      
+      // Add event listener for reconnect button
+      reconnectBtn.addEventListener('click', () => {
+        connectionStatus.textContent = 'Connection Status: Reconnecting...';
+        connectionStatus.style.color = 'orange';
+        errorElement.textContent = '';
+        wsConnection.reconnect();
       });
     </script>
   </body>
