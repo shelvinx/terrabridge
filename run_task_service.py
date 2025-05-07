@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 
 # -------------------- FastAPI Setup --------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# -------------------- FastAPI Application --------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load settings
@@ -62,6 +66,13 @@ app = FastAPI(
     description="Handles Terraform Cloud run-task webhooks and dispatches Ansible via GitHub Actions.",
     lifespan=lifespan,
 )
+
+# Dependency helpers
+def get_http_client(request: Request) -> httpx.AsyncClient:
+    return request.app.state.http_client
+
+def get_settings(request: Request) -> Settings:
+    return request.app.state.settings
 
 # Mount static files and templates
 templates = Jinja2Templates(directory="templates")
@@ -144,35 +155,75 @@ async def root(request: Request):
         },
     )
 
-@app.post("/run-task-callback")
-async def run_task_callback(request: Request):
+@app.post("/run-task")
+async def run_task(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    client: httpx.AsyncClient = Depends(get_http_client),
+    settings: Settings = Depends(get_settings),
+):
     body_bytes = await request.body()
-    payload = RunTaskPayload.parse_raw(body_bytes)
-
-    # Store raw payload
+    # Store raw payload in Redis
     redis: Redis = request.app.state.redis
     await redis.set("last_payload", body_bytes.decode())
 
-    # Optionally extract and store structured info
-    info = {
-        "stage": payload.stage,
-        "run_id": payload.run_id,
-    }
-    await redis.set("latest_job", json.dumps(info))
+    sig_header = request.headers.get("X-TFC-Task-Signature") or request.headers.get("X-TFC-Task-Signature-256")
+    if settings.hmac_key:
+        if not sig_header:
+            logger.warning("Missing signature header")
+            raise HTTPException(status_code=400, detail="Missing signature header")
+        expected = hmac.new(
+            settings.hmac_key.get_secret_value().encode(), body_bytes, hashlib.sha512
+        ).hexdigest()
+        if not hmac.compare_digest(sig_header, expected):
+            logger.warning("Invalid signature")
+            raise HTTPException(status_code=401, detail="Invalid signature")
 
-    return {"status": "ok"}
+    try:
+        data = json.loads(body_bytes)
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON body")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    try:
+        payload = RunTaskPayload.parse_obj(data)
+    except ValidationError as e:
+        logger.error("Payload validation errors: %s", e.errors())
+        raise HTTPException(status_code=422, detail=e.errors())
+
+    background_tasks.add_task(handle_task_result, payload, client, settings)
+    return JSONResponse(status_code=200, content={})
 
 @app.post("/github-webhook")
-async def github_webhook(request: Request):
-    body = await request.json()
-    # Extract relevant fields from GitHub payload
-    info = {
-        "workflow": body.get("workflow_run", {}).get("name"),
-        "status": body.get("workflow_run", {}).get("conclusion"),
-    }
-    redis: Redis = request.app.state.redis
-    await redis.set("latest_job", json.dumps(info))
-    return {"status": "received"}
+async def github_webhook(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+):
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    body = await request.body()
+    if settings.github_webhook_secret:
+        mac = hmac.new(
+            settings.github_webhook_secret.get_secret_value().encode(),
+            body,
+            hashlib.sha256,
+        )
+        if not hmac.compare_digest(f"sha256={mac.hexdigest()}", signature):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+    event = request.headers.get("X-GitHub-Event", "")
+    data = json.loads(body)
+
+    if event == "workflow_job":
+        job = data.get("workflow_job", {})
+        info = {
+            "workflow_name": job.get("workflow_name"),
+            "started_at": job.get("started_at"),
+            "completed_at": job.get("completed_at"),
+        }
+        redis: Redis = request.app.state.redis
+        await redis.set("latest_job", json.dumps(info))
+
+    return {}
 
 @app.websocket("/ws")
 async def ws_status(websocket: WebSocket):
@@ -181,13 +232,12 @@ async def ws_status(websocket: WebSocket):
     client = app.state.http_client
     settings = app.state.settings
 
-    last_tf = None
-    last_job = None
-
-    # send initial data
-    raw = await redis.get("last_payload")
-    if raw:
-        data = json.loads(raw)
+    # Send initial data
+    raw_initial = await redis.get("last_payload")
+    last_tf_raw = None
+    last_job_raw = None
+    if raw_initial:
+        data = json.loads(raw_initial)
         run_id = data.get("run_id")
         resp = await client.get(
             f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
@@ -198,45 +248,49 @@ async def ws_status(websocket: WebSocket):
         attrs = body["data"]["attributes"]
         included = body.get("included", [])
         ws_name = next(
-            (i["attributes"]["name"] for i in included if i["type"] == "workspaces"), None
+            (i["attributes"]["name"] for i in included if i["type"] == "workspaces"),
+            None,
         )
         await websocket.send_json({
             "workspace_name": ws_name,
             "action": attrs.get("run-action") or data.get("stage"),
             "duration": attrs.get("apply-duration-seconds"),
         })
-        last_tf = raw
-        last_job = await redis.get("latest_job")
+        last_tf_raw = raw_initial
+        last_job_raw = await redis.get("latest_job")
 
+    # Poll loop for updates
     while True:
-        raw_new = await redis.get("last_payload")
-        job_new = await redis.get("latest_job")
-        if raw_new != last_tf or job_new != last_job:
-            update = {}
-            if raw_new != last_tf and raw_new:
-                data = json.loads(raw_new)
-                run_id = data.get("run_id")
-                resp = await client.get(
-                    f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
-                    headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
-                )
-                resp.raise_for_status()
-                body = resp.json()
-                attrs = body["data"]["attributes"]
-                included = body.get("included", [])
-                ws_name = next(
-                    (i["attributes"]["name"] for i in included if i["type"] == "workspaces"), None
-                )
-                update.update({
-                    "workspace_name": ws_name,
-                    "action": attrs.get("run-action") or data.get("stage"),
-                    "duration": attrs.get("apply-duration-seconds"),
-                })
-                last_tf = raw_new
-            if job_new != last_job and job_new:
-                update.update(json.loads(job_new))
-                last_job = job_new
-            await websocket.send_json(update)
+        raw_tf = await redis.get("last_payload")
+        raw_job = await redis.get("latest_job")
+
+        if raw_tf and raw_tf != last_tf_raw:
+            data = json.loads(raw_tf)
+            run_id = data.get("run_id")
+            resp = await client.get(
+                f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
+                headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            attrs = body["data"]["attributes"]
+            included = body.get("included", [])
+            ws_name = next(
+                (i["attributes"]["name"] for i in included if i["type"] == "workspaces"),
+                None,
+            )
+            await websocket.send_json({
+                "workspace_name": ws_name,
+                "action": attrs.get("run-action") or data.get("stage"),
+                "duration": attrs.get("apply-duration-seconds"),
+            })
+            last_tf_raw = raw_tf
+
+        if raw_job and raw_job != last_job_raw:
+            info = json.loads(raw_job)
+            await websocket.send_json(info)
+            last_job_raw = raw_job
+
         await asyncio.sleep(0.25)
 
 
