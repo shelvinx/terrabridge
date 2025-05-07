@@ -1,0 +1,35 @@
+<!-- in templates/status.html -->
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Terraform Run Task Status</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Terraform Run Task Status</h1>
+    <p id="workspace"></p>
+    <p id="created-at"></p>
+    <p id="created-by"></p>
+    <p id="action"></p>
+    <p id="duration"></p>
+    <p id="progress"></p>
+    <p id="error" style="color:red;"></p>
+  </div>
+  <script>
+    const source = new EventSource("/events");
+    source.onmessage = e => {
+      const d = JSON.parse(e.data);
+      if (d.error) { document.getElementById("error").textContent = d.error; return; }
+      if (d.workspace_name) document.getElementById("workspace").textContent = "Workspace: " + d.workspace_name;
+      if (d.created_at)      document.getElementById("created-at").textContent = "Created at: " + d.created_at;
+      if (d.created_by)      document.getElementById("created-by").textContent = "Created by: " + d.created_by;
+      if (d.action)          document.getElementById("action").textContent = "Action: " + d.action;
+      if (d.duration)        document.getElementById("duration").textContent = "Duration: " + d.duration + "s";
+      if (d.progress !== null) document.getElementById("progress").textContent = "Progress: " + d.progress + "%";
+    };
+  </script>
+</body>
+</html>

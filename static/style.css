@@ -1,0 +1,55 @@
+/* file: static/style.css */
+
+@font-face {
+    font-family: 'Inter';
+    src: url('https://fonts.gstatic.com/s/inter/v18/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2ZL7W0I5nvwUgHU.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0 2rem;
+  background-color: #121212;
+  color: #e0e0e0;
+  font-family: 'Inter', sans-serif;
+  line-height: 1.6;
+}
+
+.container {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem 0;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 1.5rem 0 1rem;
+  color: #ffffff;
+}
+
+p {
+  margin: 0 0 1rem 0;
+}
+
+a {
+  color: #64b5f6;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+pre, code {
+  background-color: #1e1e1e;
+  padding: 0.5rem;
+  border-radius: 4px;
+  overflow-x: auto;
+}
