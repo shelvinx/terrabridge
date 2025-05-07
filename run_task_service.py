@@ -26,15 +26,18 @@ app = FastAPI(
 client: httpx.AsyncClient
 settings: Settings
 
+
 @app.on_event("startup")
 async def startup_event():
     global client, settings
     client = httpx.AsyncClient(timeout=10.0)
     settings = get_settings()
 
+
 @app.on_event("shutdown")
 async def shutdown_event():
     await client.aclose()
+
 
 # -------------------- Models --------------------
 class RunTaskPayload(BaseModel):
@@ -45,24 +48,24 @@ class RunTaskPayload(BaseModel):
     run_id: str
 
     model_config = ConfigDict(
-        validate_default=True,
-        populate_by_name=True,
-        extra="ignore"
+        validate_default=True, populate_by_name=True, extra="ignore"
     )
+
 
 # -------------------- Health Endpoints --------------------
 @app.get("/")
 async def health():
     return {"status": "ok"}
 
+
 @app.head("/", include_in_schema=False)
 async def root_head() -> Response:
     return Response(status_code=200)
 
+
 @app.get("/run-task")
 async def ping():
     return {"status": "ready"}
-
 
 
 # -------------------- Main Endpoint --------------------
@@ -81,9 +84,7 @@ async def run_task(
             logger.warning("Missing X-TFC-Task-Signature header")
             raise HTTPException(status_code=400, detail="Missing signature header")
         expected = hmac.new(
-            settings.hmac_key.get_secret_value().encode(),
-            body_bytes,
-            hashlib.sha512
+            settings.hmac_key.get_secret_value().encode(), body_bytes, hashlib.sha512
         ).hexdigest()
         if not hmac.compare_digest(sig_header, expected):
             logger.warning("Invalid signature")
@@ -105,6 +106,7 @@ async def run_task(
     background_tasks.add_task(handle_task_result, payload)
     return JSONResponse(content={}, status_code=200)
 
+
 # -------------------- Helper Functions --------------------
 def determine_status_and_message(stage: str, is_destroy: bool) -> Tuple[str, str]:
     if is_destroy:
@@ -113,16 +115,26 @@ def determine_status_and_message(stage: str, is_destroy: bool) -> Tuple[str, str
         return "passed", "Task passed at post_apply."
     return "skipped", f"Unhandled run task stage: {stage}"
 
+
 async def post_task_result(
     callback_url: HttpUrl,
     access_token: SecretStr,
     status: str,
     message: str,
 ) -> None:
-    payload = {"data": {"type": "task-results", "attributes": {"status": status, "message": message}}}
+    payload = {
+        "data": {
+            "type": "task-results",
+            "attributes": {"status": status, "message": message},
+        }
+    }
     # Ensure URL is str
     url_str = str(callback_url)
-    masked = access_token.get_secret_value()[:4] + "..." + access_token.get_secret_value()[-4:]
+    masked = (
+        access_token.get_secret_value()[:4]
+        + "..."
+        + access_token.get_secret_value()[-4:]
+    )
     logger.debug(f"Posting result to callback: {payload}")
     logger.debug(f"Callback URL: {url_str}")
     logger.debug(f"Using access_token: {masked}")
@@ -135,6 +147,7 @@ async def post_task_result(
     if resp.status_code != 200:
         logger.error(f"Callback PATCH failed: {resp.status_code} - {resp.text}")
 
+
 async def dispatch_workflow_if_applicable(payload: RunTaskPayload) -> None:
     if payload.stage != "post_apply":
         return
@@ -145,7 +158,7 @@ async def dispatch_workflow_if_applicable(payload: RunTaskPayload) -> None:
         logger.debug(f"Fetching run details for destroy check: {url2}")
         resp2 = await client.get(
             url2,
-            headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"}
+            headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
         )
         if resp2.status_code == 200:
             attrs = resp2.json()["data"]["attributes"]
@@ -155,9 +168,13 @@ async def dispatch_workflow_if_applicable(payload: RunTaskPayload) -> None:
                 logger.info("Detected destroy run, skipping GitHub Actions dispatch.")
                 return
         else:
-            logger.warning(f"Failed to fetch run attributes for {run_id}: {resp2.status_code}")
+            logger.warning(
+                f"Failed to fetch run attributes for {run_id}: {resp2.status_code}"
+            )
     else:
-        logger.warning("No run_id provided, cannot check destroy status. Proceeding with dispatch.")
+        logger.warning(
+            "No run_id provided, cannot check destroy status. Proceeding with dispatch."
+        )
     # Dispatch now that it's confirmed as apply
     logger.info("Dispatching GitHub Actions workflow for Ansible")
     gh_token = settings.gh_token
@@ -183,9 +200,12 @@ async def dispatch_workflow_if_applicable(payload: RunTaskPayload) -> None:
         "Accept": "application/vnd.github.v3+json",
     }
     resp = await client.post(dispatch_url, json=body, headers=headers)  # type: ignore
-    logger.debug(f"GitHub Actions dispatch status: {resp.status_code}, body: {resp.text}")
+    logger.debug(
+        f"GitHub Actions dispatch status: {resp.status_code}, body: {resp.text}"
+    )
     if resp.status_code >= 300:
         logger.error(f"Dispatch failed: {resp.status_code} - {resp.text}")
+
 
 async def handle_task_result(payload: RunTaskPayload) -> None:
     try:
@@ -197,7 +217,9 @@ async def handle_task_result(payload: RunTaskPayload) -> None:
     except Exception:
         logger.exception("Error handling task result")
 
+
 if __name__ == "__main__":
     import uvicorn, os
+
     port = int(os.getenv("PORT", 3000))
     uvicorn.run("run_task_service:app", host="0.0.0.0", port=port)
