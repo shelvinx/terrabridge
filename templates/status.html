@@ -33,7 +33,6 @@
       
       // Get DOM elements
       const connectionStatus = document.getElementById('connection-status');
-      const reconnectBtn = document.getElementById('reconnect-btn');
       const errorElement = document.getElementById('error');
       
       // Initialize WebSocket and store the returned methods
@@ -46,12 +45,10 @@
             if (data.status === 'connected') {
               connectionStatus.textContent = 'Connection Status: Connected';
               connectionStatus.style.color = 'green';
-              reconnectBtn.style.display = 'none';
               errorElement.textContent = '';
             } else if (data.status === 'disconnected') {
               connectionStatus.textContent = 'Connection Status: Disconnected';
               connectionStatus.style.color = 'red';
-              reconnectBtn.style.display = 'inline-block';
             }
             return;
           }

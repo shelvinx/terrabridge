@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     github_webhook_secret: Optional[SecretStr] = Field(
         None, env="GITHUB_WEBHOOK_SECRET"
     )
+    redis_url: str = Field(
+        default="redis-11952.c56.east-us.azure.redns.redis-cloud.com:11952",
+        env="REDIS_URL",
+    )
 
     @field_validator("github_repository")
     def validate_repo_format(cls, v: str) -> str:
