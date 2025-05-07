@@ -19,3 +19,4 @@ typing-inspection==0.4.0
 uvicorn[standard]==0.34.2
 pydantic-settings==2.9.1
 jinja2>=3.1.6
+redis==6.0.0 
