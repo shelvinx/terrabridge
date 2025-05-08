@@ -11,8 +11,7 @@
     <div class="container">
       <h1>Terraform Run Task Status</h1>
       <div class="status-container">
-        <p id="connection-status">Connection Status: Connecting...</p>
-        <button id="reconnect-btn" style="display:none;">Reconnect</button>
+        <p id="connection-status">Websocket Status: Connecting...</p>
       </div>
       <div class="data-container">
         <h2>Terraform Data</h2>
@@ -43,11 +42,11 @@
           // Handle connection status updates
           if (data.status) {
             if (data.status === 'connected') {
-              connectionStatus.textContent = 'Connection Status: Connected';
+              connectionStatus.textContent = 'Websocket Status: Connected';
               connectionStatus.style.color = 'green';
               errorElement.textContent = '';
             } else if (data.status === 'disconnected') {
-              connectionStatus.textContent = 'Connection Status: Disconnected';
+              connectionStatus.textContent = 'Websocket Status: Disconnected';
               connectionStatus.style.color = 'red';
             }
             return;
