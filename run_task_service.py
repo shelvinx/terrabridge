@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from redis.asyncio import Redis
+import asyncio
 
 # -------------------- Logging --------------------
 logging.basicConfig(level=logging.INFO)
