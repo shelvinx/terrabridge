@@ -253,6 +253,7 @@ async def ui(request: Request):
             "action": attrs.get("run-action") or data.get("stage"),
             "created_by": data.get("run_created_by"),
             "created_at": data.get("run_created_at"),
+            "is_destroy": data.get("is_destroy"),
         },
     )
 

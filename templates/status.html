@@ -73,10 +73,10 @@
               actionEl.style.display = 'block';
             }
             
-            if (data.duration) {
-              const durationEl = document.getElementById("duration");
-              durationEl.textContent = "Duration: " + data.duration + "s";
-              durationEl.style.display = 'block';
+            if (data.is_destroy) {
+              const isDestroyEl = document.getElementById("is_destroy");
+              isDestroyEl.textContent = "Is Destroy: " + data.is_destroy;
+              isDestroyEl.style.display = 'block';
             }
             
             // Update Ansible workflow job data with better error handling
