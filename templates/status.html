@@ -88,13 +88,15 @@
             
             if (data.started_at) {
               const startedEl = document.getElementById("started-at");
-              startedEl.textContent = "Started: " + data.started_at;
+              const dt = new Date(data.started_at);                    // parse ISO string
+              startedEl.textContent = "Started: " + dt.toLocaleString();     // or toLocaleTimeString()
               startedEl.style.display = 'block';
             }
-            
+
             if (data.completed_at) {
               const completedEl = document.getElementById("completed-at");
-              completedEl.textContent = "Completed: " + data.completed_at;
+              const dt2 = new Date(data.completed_at);
+              completedEl.textContent = "Completed: " + dt2.toLocaleString();
               completedEl.style.display = 'block';
             }
             
