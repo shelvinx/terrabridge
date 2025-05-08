@@ -34,6 +34,7 @@ import asyncio
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 # ────────────────────────────────────────── models ──────────────────────────────────────────
 class RunTaskPayload(BaseModel):
     payload_version: int
@@ -41,6 +42,7 @@ class RunTaskPayload(BaseModel):
     access_token: SecretStr
     task_result_callback_url: HttpUrl
     run_id: str
+
 
 # ────────────────────────────────────────── helpers ─────────────────────────────────────────
 async def is_destroy_run(
@@ -53,6 +55,7 @@ async def is_destroy_run(
     resp.raise_for_status()
     return resp.json()["data"]["attributes"].get("is-destroy", False)
 
+
 # Terraform Post-Apply Run Message
 def determine_status_and_message(stage: str) -> Tuple[str, str]:
     if stage == "post_apply":
@@ -61,21 +64,32 @@ def determine_status_and_message(stage: str) -> Tuple[str, str]:
 
 
 async def post_task_result(
-    *, callback_url: HttpUrl, access_token: SecretStr, status: str, message: str, client: httpx.AsyncClient
+    *,
+    callback_url: HttpUrl,
+    access_token: SecretStr,
+    status: str,
+    message: str,
+    client: httpx.AsyncClient,
 ) -> None:
     body = {
-        "data": {"type": "task-results", "attributes": {"status": status, "message": message}}
+        "data": {
+            "type": "task-results",
+            "attributes": {"status": status, "message": message},
+        }
     }
     headers = {
         "Authorization": f"Bearer {access_token.get_secret_value()}",
         "Content-Type": "application/vnd.api+json",
     }
-    resp = await client.post(str(callback_url), json=body, headers=headers)
+    resp = await client.patch(str(callback_url), json=body, headers=headers)
     resp.raise_for_status()
 
 
 async def dispatch_workflow_if_apply(
-    payload: RunTaskPayload, client: httpx.AsyncClient, settings: Settings, destroy: bool
+    payload: RunTaskPayload,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    destroy: bool,
 ) -> None:
     if destroy or payload.stage != "post_apply":
         return
@@ -93,7 +107,9 @@ async def dispatch_workflow_if_apply(
     resp.raise_for_status()
 
 
-async def handle_task_result(payload: RunTaskPayload, client: httpx.AsyncClient, settings: Settings) -> None:
+async def handle_task_result(
+    payload: RunTaskPayload, client: httpx.AsyncClient, settings: Settings
+) -> None:
     destroy = await is_destroy_run(payload.run_id, client, settings)
     status, message = determine_status_and_message(payload.stage)
     await post_task_result(
@@ -104,6 +120,7 @@ async def handle_task_result(payload: RunTaskPayload, client: httpx.AsyncClient,
         client=client,
     )
     await dispatch_workflow_if_apply(payload, client, settings, destroy)
+
 
 # ──────────────────────────────────────── app factory ───────────────────────────────────────
 templates = Jinja2Templates(directory="templates")
@@ -135,6 +152,7 @@ app = FastAPI(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 # ────────────────────────────────────────── simple routes ───────────────────────────────────
 @app.get("/run-task")
@@ -174,6 +192,7 @@ async def run_task(
     background_tasks.add_task(handle_task_result, payload, client, settings)
     return JSONResponse({"enqueued": True})
 
+
 # ───────────────────────────────────── github webhook ───────────────────────────────────────
 @app.post("/github-webhook")
 async def github_webhook(request: Request, settings: Settings = Depends(get_settings)):
@@ -198,6 +217,7 @@ async def github_webhook(request: Request, settings: Settings = Depends(get_sett
         await request.app.state.redis.set("latest_job", json.dumps(info))
     return {}
 
+
 # ───────────────────────────────────────── ui + helpers ─────────────────────────────────────
 @app.get("/")
 async def ui(request: Request):
@@ -218,7 +238,11 @@ async def ui(request: Request):
     body = resp.json()
     attrs = body["data"]["attributes"]
     ws_name = next(
-        (i["attributes"]["name"] for i in body.get("included", []) if i["type"] == "workspaces"),
+        (
+            i["attributes"]["name"]
+            for i in body.get("included", [])
+            if i["type"] == "workspaces"
+        ),
         None,
     )
     return templates.TemplateResponse(
@@ -236,7 +260,10 @@ async def ui(request: Request):
 @app.get("/status")
 async def status(request: Request):
     r = request.app.state.redis
-    return {"terraform": await r.get("last_payload"), "workflow": await r.get("latest_job")}
+    return {
+        "terraform": await r.get("last_payload"),
+        "workflow": await r.get("latest_job"),
+    }
 
 
 # ───────────────────────────────────── websocket push ───────────────────────────────────────
@@ -268,7 +295,9 @@ async def ws_status(ws: WebSocket):
         await asyncio.sleep(0.25)
 
 
-async def _send_tf_update(ws: WebSocket, raw: str, client: httpx.AsyncClient, settings: Settings) -> None:
+async def _send_tf_update(
+    ws: WebSocket, raw: str, client: httpx.AsyncClient, settings: Settings
+) -> None:
     data = json.loads(raw)
     run_id = data["run_id"]
     resp = await client.get(
@@ -279,7 +308,11 @@ async def _send_tf_update(ws: WebSocket, raw: str, client: httpx.AsyncClient, se
     body = resp.json()
     attrs = body["data"]["attributes"]
     ws_name = next(
-        (i["attributes"]["name"] for i in body.get("included", []) if i["type"] == "workspaces"),
+        (
+            i["attributes"]["name"]
+            for i in body.get("included", [])
+            if i["type"] == "workspaces"
+        ),
         None,
     )
     await ws.send_json(
