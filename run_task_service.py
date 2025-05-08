@@ -53,13 +53,11 @@ async def is_destroy_run(
     resp.raise_for_status()
     return resp.json()["data"]["attributes"].get("is-destroy", False)
 
-
-def determine_status_and_message(stage: str, destroy: bool) -> Tuple[str, str]:
-    if destroy:
-        return "skipped", "Destroy run detected, skipping run task."
+# Terraform Post-Apply Run Message
+def determine_status_and_message(stage: str) -> Tuple[str, str]:
     if stage == "post_apply":
         return "passed", "Task passed at post_apply."
-    return "skipped", f"Unhandled run task stage: {stage}"
+    return "passed", f"Task passed at stage: {stage}"
 
 
 async def post_task_result(
