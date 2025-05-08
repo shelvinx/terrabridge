@@ -321,6 +321,7 @@ async def _send_tf_update(
             "workspace_name": ws_name,
             "action": attrs.get("run-action") or data.get("stage"),
             "duration": attrs.get("apply-duration-seconds"),
+            "is_destroy": attrs.get("is-destroy"),
         }
     )
 
