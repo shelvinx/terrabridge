@@ -70,7 +70,7 @@ async def post_task_result(
         "Authorization": f"Bearer {access_token.get_secret_value()}",
         "Content-Type": "application/vnd.api+json",
     }
-    resp = await client.patch(str(callback_url), json=body, headers=headers)
+    resp = await client.post(str(callback_url), json=body, headers=headers)
     resp.raise_for_status()
 
 
@@ -95,7 +95,7 @@ async def dispatch_workflow_if_apply(
 
 async def handle_task_result(payload: RunTaskPayload, client: httpx.AsyncClient, settings: Settings) -> None:
     destroy = await is_destroy_run(payload.run_id, client, settings)
-    status, message = determine_status_and_message(payload.stage, destroy)
+    status, message = determine_status_and_message(payload.stage)
     await post_task_result(
         callback_url=payload.task_result_callback_url,
         access_token=payload.access_token,
