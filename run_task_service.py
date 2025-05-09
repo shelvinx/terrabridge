@@ -160,7 +160,7 @@ async def ready():
     return {"status": "ready"}
 
 
-@app.get("/health")
+@app.get("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok"}
 
