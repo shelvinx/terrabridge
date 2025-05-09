@@ -160,9 +160,13 @@ async def ready():
     return {"status": "ready"}
 
 
-@app.get("/health", methods=["GET", "HEAD"])
+@app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.head("/health")
+async def health_head():
+    return Response(status_code=200)
 
 
 # ────────────────────────────────────── terraform callback ──────────────────────────────────
