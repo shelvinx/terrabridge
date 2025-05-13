@@ -242,6 +242,7 @@ async def run_task(
     body = await request.body()
     redis: Redis = request.app.state.redis
     await redis.set("last_payload", body.decode())
+    await app.state.redis.publish("tf_updates", body.decode())
 
     # HMAC verify (optional)
     sig = request.headers.get("X-TFC-Task-Signature")
@@ -281,6 +282,7 @@ async def github_webhook(request: Request, settings: Settings = Depends(get_sett
             "completed_at": job["completed_at"],
         }
         await request.app.state.redis.set("latest_job", json.dumps(info))
+        await request.app.state.redis.publish("tf_updates", json.dumps(info))
     return {}
 
 
