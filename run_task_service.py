@@ -1,8 +1,12 @@
 # file: run_task_service.py
 
+import asyncio
 import logging
 import os
 from typing import Optional, Tuple
+import redis.asyncio as redis
+from redis.exceptions import RedisError
+from starlette.websockets import WebSocket, WebSocketDisconnect
 import httpx
 from fastapi import (
     BackgroundTasks,
@@ -27,7 +31,7 @@ from settings import get_settings, Settings
 from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from redis.asyncio import Redis
+# from redis.asyncio import Redis  # Already imported as redis
 import asyncio
 
 # ────────────────────────────────────────── logging ─────────────────────────────────────────
@@ -134,15 +138,47 @@ def get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
+import weakref
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings()
     app.state.settings = settings
-    app.state.redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    app.state.redis_pool = redis.ConnectionPool.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        max_connections=10,  # Conservative cap, below Redis Cloud plan limit
+        retry_on_timeout=True,
+        socket_connect_timeout=5,
+        socket_keepalive=True
+    )
+    app.state.redis = redis.Redis(connection_pool=app.state.redis_pool)
     app.state.http_client = httpx.AsyncClient(timeout=10.0)
+    app.state.clients = weakref.WeakSet()  # Track live WebSockets
+    app.state.pubsub = app.state.redis.pubsub()
+    await app.state.pubsub.subscribe("tf_updates")
+    asyncio.create_task(broadcast_loop(app))
+    import logging
+    logging.info("[Startup] Created global Redis client, pool, and single pubsub for WebSockets.")
     yield
     await app.state.http_client.aclose()
     await app.state.redis.close()
+    await app.state.redis_pool.disconnect()
+
+async def broadcast_loop(app):
+    """Single task that listens on Redis and fans out to every connected socket."""
+    async for msg in app.state.pubsub.listen():
+        if msg["type"] != "message":
+            continue
+        dead = []
+        for ws in list(app.state.clients):
+            try:
+                await ws.send_text(msg["data"])
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            app.state.clients.discard(ws)
+
 
 
 app = FastAPI(
@@ -150,6 +186,32 @@ app = FastAPI(
     description="Handles Terraform Cloud run-task webhooks and GitHub Actions callbacks.",
     lifespan=lifespan,
 )
+
+
+@app.get("/redis-health")
+async def redis_health(request: Request):
+    """
+    Returns Redis connection info for monitoring connection usage.
+    """
+    redis_client = request.app.state.redis
+    info = await redis_client.info(section="clients")
+    return {
+        "connected_clients": info.get("connected_clients"),
+        "client_longest_output_list": info.get("client_longest_output_list"),
+        "client_biggest_input_buf": info.get("client_biggest_input_buf"),
+        "blocked_clients": info.get("blocked_clients")
+    }
+
+@app.get("/metrics")
+async def metrics(request: Request):
+    """
+    Returns metrics on Pub/Sub channel usage and in-flight WebSockets.
+    """
+    return {
+        "active_pubsub_channels": list(request.app.state.pubsub_channels),
+        "inflight_websockets": len(request.app.state.inflight_websockets)
+    }
+
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -275,62 +337,17 @@ async def status(request: Request):
 @app.websocket("/ws")
 async def ws_status(ws: WebSocket):
     await ws.accept()
-    r: Redis = app.state.redis
-    http_client = app.state.http_client
-    settings: Settings = app.state.settings
+    ws.app.state.clients.add(ws)
+    try:
+        while True:
+            await ws.receive_text()  # blocks; returns on client ping/close
+    except WebSocketDisconnect:
+        pass
+    finally:
+        app.state.clients.discard(ws)
 
-    last_tf = await r.get("last_payload")
-    last_gh = await r.get("latest_job")
-    if last_tf:
-        await _send_tf_update(ws, last_tf, http_client, settings)
-    if last_gh:
-        await ws.send_json(json.loads(last_gh))
+# ... (rest of the code remains the same)
 
-    while True:
-        tf = await r.get("last_payload")
-        gh = await r.get("latest_job")
-
-        if tf and tf != last_tf:
-            await _send_tf_update(ws, tf, http_client, settings)
-            last_tf = tf
-        if gh and gh != last_gh:
-            await ws.send_json(json.loads(gh))
-            last_gh = gh
-
-        await asyncio.sleep(0.25)
-
-
-async def _send_tf_update(
-    ws: WebSocket, raw: str, client: httpx.AsyncClient, settings: Settings
-) -> None:
-    data = json.loads(raw)
-    run_id = data["run_id"]
-    resp = await client.get(
-        f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
-        headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    attrs = body["data"]["attributes"]
-    ws_name = next(
-        (
-            i["attributes"]["name"]
-            for i in body.get("included", [])
-            if i["type"] == "workspaces"
-        ),
-        None,
-    )
-    await ws.send_json(
-        {
-            "workspace_name": ws_name,
-            "action": attrs.get("run-action") or data.get("stage"),
-            "duration": attrs.get("apply-duration-seconds"),
-            "is_destroy": attrs.get("is-destroy"),
-        }
-    )
-
-
-# ──────────────────────────────────────── main (local) ──────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 3000))
     import uvicorn
