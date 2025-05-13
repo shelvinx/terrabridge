@@ -348,7 +348,7 @@ async def ws_status(ws: WebSocket):
     finally:
         app.state.clients.discard(ws)
 
-# ... (rest of the code remains the same)
+# ──────────────────────────────────────────── main ───────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 3000))
