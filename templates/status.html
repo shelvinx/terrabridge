@@ -118,14 +118,6 @@
           }
         }
       });
-      
-      // Add event listener for reconnect button
-      reconnectBtn.addEventListener('click', () => {
-        connectionStatus.textContent = 'Connection Status: Reconnecting...';
-        connectionStatus.style.color = 'orange';
-        errorElement.textContent = '';
-        wsConnection.reconnect();
-      });
     </script>
   </body>
   </html>
