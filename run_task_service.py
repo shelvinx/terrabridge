@@ -298,11 +298,16 @@ async def ui(request: Request):
     data = json.loads(raw)
     run_id = data["run_id"]
 
-    resp = await request.app.state.http_client.get(
-        f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
-        headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
-    )
-    resp.raise_for_status()
+    try:
+        resp = await request.app.state.http_client.get(
+            f"{settings.tf_api_url}/api/v2/runs/{run_id}?include=workspace",
+            headers={"Authorization": f"Bearer {settings.tf_token.get_secret_value()}"},
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            await redis.delete("last_payload")  # one-line remediation
+        raise
     body = resp.json()
     attrs = body["data"]["attributes"]
     ws_name = next(
